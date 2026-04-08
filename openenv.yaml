@@ -1,0 +1,26 @@
+spec_version: 1
+name: medical_triage_env
+version: "1.0.0"
+description: >
+  Emergency Room Medical Triage Environment. An AI agent acts as an ER triage
+  nurse, assessing patients across 3 escalating difficulty tasks (ESI levels 1–5).
+  Real-world clinical scenarios with structured reward signals.
+
+type: step_reset
+runtime: docker
+
+app:
+  port: 7860
+  module: server.app
+  object: app
+
+metadata:
+  domain: healthcare
+  tasks: 5
+  difficulty_levels:
+    - easy
+    - medium
+    - hard
+  reward_range: [0.0, 1.0]
+  supports_concurrent_sessions: false
+  max_concurrent_envs: 1
