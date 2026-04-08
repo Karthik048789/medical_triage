@@ -204,7 +204,3 @@ The hackathon grader will:
 | `HF_TOKEN` | Hugging Face / API key |
 
 ---
-
-## 📄 License
-
-MIT — contributions welcome.
