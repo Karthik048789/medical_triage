@@ -1,0 +1,17 @@
+version = 1
+
+[[package]]
+name = "fastapi"
+version = "0.111.0"
+
+[[package]]
+name = "uvicorn"
+version = "0.30.0"
+
+[[package]]
+name = "pydantic"
+version = "2.7.0"
+
+[[package]]
+name = "openenv"
+version = "0.2.0"
