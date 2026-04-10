@@ -1,26 +1,66 @@
-spec_version: 1
-name: medical_triage_env
+name: medical-triage-env
 version: "1.0.0"
-description: >
-  Emergency Room Medical Triage Environment. An AI agent acts as an ER triage
-  nurse, assessing patients across 3 escalating difficulty tasks (ESI levels 1–5).
-  Real-world clinical scenarios with structured reward signals.
+openenv_version: "0.2.0"
+description: Medical triage simulation environment
 
-type: step_reset
-runtime: docker
+observation_type: models.TriageObservation
+action_type: models.TriageAction
+state_type: models.TriageState
 
-app:
-  port: 7860
-  module: server.app
-  object: app
+api:
+  base_url: /
+  endpoints:
+    reset:
+      method: POST
+      path: /reset
+    step:
+      method: POST
+      path: /step
+    state:
+      method: GET
+      path: /state
+    tasks:
+      method: GET
+      path: /tasks
 
-metadata:
-  domain: healthcare
-  tasks: 5
-  difficulty_levels:
-    - easy
-    - medium
-    - hard
+tasks:
+  - id: task1
+    name: Chest Pain Triage
+    description: Triage a 65-year-old male with chest pain.
+    difficulty: easy
+    max_steps: 1
+    reset_params:
+      task_id: task1
+    grader:
+      module: medical_triage_environment
+      function: openenv_grade
+  - id: task2
+    name: Fever and Cough Triage
+    description: Triage a 30-year-old female with fever and cough.
+    difficulty: medium
+    max_steps: 1
+    reset_params:
+      task_id: task2
+    grader:
+      module: medical_triage_environment
+      function: openenv_grade
+  - id: task3
+    name: Minor Cut Triage
+    description: Triage a 20-year-old male with a minor cut.
+    difficulty: hard
+    max_steps: 1
+    reset_params:
+      task_id: task3
+    grader:
+      module: medical_triage_environment
+      function: openenv_grade
+
+grader:
+  module: medical_triage_environment
+  function: openenv_grade
+
+scoring:
   reward_range: [0.0, 1.0]
-  supports_concurrent_sessions: false
-  max_concurrent_envs: 1
+  success_threshold: 0.5
+
+healthcheck: /health
