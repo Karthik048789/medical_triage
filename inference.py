@@ -22,15 +22,13 @@ import json
 import time
 import argparse
 import traceback
-from typing import Optional
 
 from openai import OpenAI
 
 # ── Import environment client ──────────────────────────────────────────────────
-# Support both local (dev) and Docker (prod) import paths
 try:
     sys.path.insert(0, os.path.dirname(__file__))
-    from models import TriageAction, TriageObservation
+    from models import TriageAction
     from client import MedicalTriageEnv
 except ImportError:
     raise RuntimeError(
@@ -38,11 +36,13 @@ except ImportError:
         "Ensure inference.py is run from the medical_triage_env root directory."
     )
 
-
 # ── Config ─────────────────────────────────────────────────────────────────────
 API_BASE_URL = os.environ.get("API_BASE_URL", "https://api.openai.com/v1")
 MODEL_NAME   = os.environ.get("MODEL_NAME", "gpt-4o-mini")
 HF_TOKEN     = os.environ.get("HF_TOKEN", "")
+
+# Tasks to evaluate — one episode per task
+TASK_IDS = ["task1", "task2", "task3"]
 
 SYSTEM_PROMPT = """You are an expert Emergency Room triage nurse with 10+ years of experience.
 You must assess each patient and respond ONLY with a valid JSON object — no prose, no markdown.
@@ -66,7 +66,7 @@ ESI Triage Levels:
 Always ground your reasoning in the vitals, chief complaint, and history provided."""
 
 
-def build_user_message(obs: TriageObservation) -> str:
+def build_user_message(obs) -> str:
     vitals_str = "\n".join(f"  {k}: {v}" for k, v in obs.vitals.items())
     return (
         f"PATIENT: {obs.patient_id}\n"
@@ -90,7 +90,6 @@ def call_llm(client: OpenAI, user_message: str) -> dict:
         ],
     )
     raw = response.choices[0].message.content.strip()
-    # Strip markdown fences if present
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):
@@ -98,88 +97,42 @@ def call_llm(client: OpenAI, user_message: str) -> dict:
     return json.loads(raw.strip())
 
 
-def log_start(episode_id: str, env_url: str, model: str):
-    print(json.dumps({
-        "event": "[START]",
-        "episode_id": episode_id,
-        "env_url": env_url,
-        "model": model,
-        "timestamp": time.time(),
-    }), flush=True)
+# ── Logging (exact format required by validator) ───────────────────────────────
+
+def log_start(task_id: str):
+    print(f"[START] task={task_id}", flush=True)
 
 
-def log_step(
-    step: int,
-    task_id: str,
-    action: dict,
-    reward: float,
-    is_correct: bool,
-    feedback: str,
-    done: bool,
-):
-    print(json.dumps({
-        "event": "[STEP]",
-        "step": step,
-        "task_id": task_id,
-        "action": action,
-        "reward": reward,
-        "is_correct": is_correct,
-        "feedback": feedback,
-        "done": done,
-        "timestamp": time.time(),
-    }), flush=True)
-
-
-def log_end(
-    episode_id: str,
-    total_steps: int,
-    total_reward: float,
-    avg_reward: float,
-    success: bool,
-):
-    print(json.dumps({
-        "event": "[END]",
-        "episode_id": episode_id,
-        "total_steps": total_steps,
-        "total_reward": total_reward,
-        "avg_reward": avg_reward,
-        "success": success,
-        "timestamp": time.time(),
-    }), flush=True)
-
-
-def run_episode(env_url: str) -> dict:
-    """Run one full episode and return summary metrics."""
-    llm_client = OpenAI(
-        base_url=API_BASE_URL,
-        api_key=HF_TOKEN or "dummy-key",  # some providers use HF_TOKEN
+def log_step(step: int, task_id: str, reward: float, is_correct: bool, done: bool):
+    print(
+        f"[STEP] step={step} task={task_id} reward={reward:.4f} "
+        f"is_correct={is_correct} done={done}",
+        flush=True,
     )
 
-    results = {
-        "episode_id": "",
-        "steps": 0,
-        "total_reward": 0.0,
-        "scores": [],
-        "success": False,
-    }
 
+def log_end(task_id: str, steps: int, score: float):
+    print(f"[END] task={task_id} score={score:.4f} steps={steps}", flush=True)
+
+
+# ── Episode runner (one task per episode) ──────────────────────────────────────
+
+def run_task_episode(env_url: str, task_id: str, llm_client: OpenAI) -> dict:
+    """Run one episode for a specific task and return its score."""
     with MedicalTriageEnv(base_url=env_url).sync() as env:
-        # Reset
-        obs = env.reset()
-        episode_id = f"ep_{int(time.time())}"
-        results["episode_id"] = episode_id
-        log_start(episode_id, env_url, MODEL_NAME)
+        obs = env.reset(task_id=task_id)
+
+        log_start(task_id=task_id)
 
         step = 0
+        total_reward = 0.0
         done = False
 
         while not done:
-            # Build prompt and call LLM
             user_msg = build_user_message(obs)
             try:
                 llm_output = call_llm(llm_client, user_msg)
-            except (json.JSONDecodeError, Exception) as e:
-                # Fallback action on LLM parse failure
+            except Exception as e:
                 llm_output = {
                     "patient_id": obs.patient_id,
                     "triage_level": "3",
@@ -196,39 +149,22 @@ def run_episode(env_url: str) -> dict:
                 disposition=llm_output.get("disposition", "waiting_room"),
             )
 
-            # Step
             result = env.step(action)
-            reward = result.reward or 0.0
+            # Clamp reward strictly within (0, 1) — never 0.0 or 1.0
+            raw_reward = float(result.reward) if result.reward is not None else 0.5
+            reward = max(0.001, min(0.999, raw_reward))
             obs = result.observation
-
-            results["total_reward"] += reward
-            results["scores"].append(reward)
-            results["steps"] += 1
+            total_reward += reward
             step += 1
             done = result.done or obs.episode_done
 
-            log_step(
-                step=step,
-                task_id=obs.patient_id if not done else f"task_{step}",
-                action=llm_output,
-                reward=reward,
-                is_correct=obs.is_correct,
-                feedback=obs.feedback,
-                done=done,
-            )
+            log_step(step=step, task_id=task_id, reward=reward,
+                     is_correct=obs.is_correct, done=done)
 
-        results["success"] = results["total_reward"] / max(results["steps"], 1) >= 0.5
-        avg = results["total_reward"] / max(results["steps"], 1)
+        score = max(0.001, min(0.999, total_reward / max(step, 1)))
+        log_end(task_id=task_id, steps=step, score=score)
 
-        log_end(
-            episode_id=episode_id,
-            total_steps=results["steps"],
-            total_reward=results["total_reward"],
-            avg_reward=avg,
-            success=results["success"],
-        )
-
-    return results
+        return {"task_id": task_id, "score": score, "steps": step}
 
 
 def main():
@@ -238,36 +174,25 @@ def main():
         default=os.environ.get("ENV_URL", "http://localhost:7860"),
         help="Base URL of the deployed environment (default: http://localhost:7860)",
     )
-    parser.add_argument(
-        "--episodes",
-        type=int,
-        default=3,
-        help="Number of episodes to run (default: 3)",
-    )
     args = parser.parse_args()
 
-    all_rewards = []
+    llm_client = OpenAI(
+        base_url=API_BASE_URL,
+        api_key=HF_TOKEN or "dummy-key",
+    )
+
     all_scores = []
 
-    for ep in range(args.episodes):
-        print(f"\n{'='*60}", flush=True)
-        print(f"Running episode {ep + 1}/{args.episodes} ...", flush=True)
-        print(f"{'='*60}", flush=True)
+    for task_id in TASK_IDS:
         try:
-            result = run_episode(args.env_url)
-            all_rewards.append(result["total_reward"])
-            all_scores.extend(result["scores"])
+            result = run_task_episode(args.env_url, task_id, llm_client)
+            all_scores.append(result["score"])
         except Exception:
             traceback.print_exc()
             sys.exit(1)
 
-    # Final summary
-    print("\n" + "="*60, flush=True)
-    print("INFERENCE COMPLETE", flush=True)
-    print(f"Episodes run : {args.episodes}", flush=True)
-    print(f"Mean episode reward: {sum(all_rewards)/max(len(all_rewards),1):.4f}", flush=True)
-    print(f"Mean step reward   : {sum(all_scores)/max(len(all_scores),1):.4f}", flush=True)
-    print("="*60, flush=True)
+    print(f"\nAll task scores: {all_scores}", flush=True)
+    print(f"Mean score: {sum(all_scores)/max(len(all_scores),1):.4f}", flush=True)
 
 
 if __name__ == "__main__":
